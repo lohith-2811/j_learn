@@ -3,18 +3,39 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { initDB, getDB } from './db.js';
+import cors from 'cors';
 
+// Load environment variables
 dotenv.config();
+
+// Initialize Express app
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000; // Railway typically uses 5000
 const JWT_SECRET = process.env.JWT_SECRET;
 
+// Middleware
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Health check endpoint
+app.get('/', (req, res) => {
+  res.status(200).json({ 
+    status: 'healthy',
+    message: 'JLearn API is running',
+    timestamp: new Date().toISOString()
+  });
+});
 
 // Initialize database
-initDB();
+await initDB();
 
-// Middleware to authenticate JWT
+// JWT Authentication Middleware
 const authenticateJWT = (req, res, next) => {
   const authHeader = req.headers.authorization;
   
@@ -23,37 +44,42 @@ const authenticateJWT = (req, res, next) => {
     
     jwt.verify(token, JWT_SECRET, (err, user) => {
       if (err) {
-        return res.sendStatus(403);
+        console.error('JWT verification error:', err);
+        return res.status(403).json({ error: 'Invalid or expired token' });
       }
       
       req.user = user;
       next();
     });
   } else {
-    res.sendStatus(401);
+    res.status(401).json({ error: 'Authorization header missing' });
   }
 };
 
 // Signup Route
 app.post('/signup', async (req, res) => {
+  console.log('Signup request received:', req.body);
+  
   const { username, email, password } = req.body;
   
   // Validation
-  if (!email || !username || !password) {
-    return res.status(400).json({ error: 'Email, username, and password are required.' });
-  }
+  if (!email) return res.status(400).json({ error: 'Email is required', field: 'email' });
+  if (!username) return res.status(400).json({ error: 'Username is required', field: 'username' });
+  if (!password) return res.status(400).json({ error: 'Password is required', field: 'password' });
 
   const usernameRegex = /^[a-zA-Z0-9_]{3,20}$/;
   if (!usernameRegex.test(username)) {
     return res.status(400).json({ 
-      error: 'Username must be 3-20 characters (letters, numbers, underscores)' 
+      error: 'Username must be 3-20 characters (letters, numbers, underscores)',
+      field: 'username'
     });
   }
 
   const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)[a-zA-Z\d]{8,}$/;
   if (!passwordRegex.test(password)) {
     return res.status(400).json({ 
-      error: 'Password must be at least 8 characters with uppercase, lowercase, and number'
+      error: 'Password must be at least 8 characters with uppercase, lowercase, and number',
+      field: 'password'
     });
   }
 
@@ -61,39 +87,51 @@ app.post('/signup', async (req, res) => {
     const db = getDB();
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Insert into user_profiles
     const result = await db.execute({
       sql: 'INSERT INTO user_profiles (username, email, password_hash) VALUES (?, ?, ?)',
       args: [username, email, hashedPassword],
     });
 
-    // Get the inserted user_id
     const user_id = result.lastInsertRowid;
 
-    // Initialize user_achievements with 0 XP
     await db.execute({
       sql: 'INSERT INTO user_achievements (user_id, xp_points) VALUES (?, ?)',
       args: [user_id, 0],
     });
 
     return res.status(201).json({ 
-      message: 'User registered successfully.',
+      success: true,
+      message: 'User registered successfully',
       user: { user_id, username, email }
     });
   } catch (err) {
-    if (err.message && err.message.includes('UNIQUE')) {
-      return res.status(409).json({ error: 'Email already exists.' });
-    }
     console.error('Signup error:', err);
-    return res.status(500).json({ error: 'Server error.' });
+    if (err.message && err.message.includes('UNIQUE')) {
+      return res.status(409).json({ 
+        error: 'Email already exists',
+        field: 'email'
+      });
+    }
+    return res.status(500).json({ 
+      error: 'Registration failed',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
 
 // Login Route
 app.post('/login', async (req, res) => {
+  console.log('Login attempt:', req.body.email);
+  
   const { email, password } = req.body;
   if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required.' });
+    return res.status(400).json({ 
+      error: 'Email and password are required',
+      fields: {
+        email: !email ? 'Missing' : 'Provided',
+        password: !password ? 'Missing' : 'Provided'
+      }
+    });
   }
 
   try {
@@ -102,18 +140,17 @@ app.post('/login', async (req, res) => {
       sql: 'SELECT * FROM user_profiles WHERE email = ?',
       args: [email],
     });
+    
     const user = result.rows[0];
-
     if (!user) {
-      return res.status(401).json({ error: 'Invalid credentials.' });
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
-      return res.status(401).json({ error: 'Invalid credentials.' });
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Update last_login timestamp
     await db.execute({
       sql: 'UPDATE user_profiles SET last_login = CURRENT_TIMESTAMP WHERE user_id = ?',
       args: [user.user_id],
@@ -126,11 +163,12 @@ app.post('/login', async (req, res) => {
         username: user.username 
       }, 
       JWT_SECRET, 
-      { expiresIn: '1h' }
+      { expiresIn: '24h' } // Extended token expiration
     );
     
     return res.json({ 
-      message: 'Login successful.', 
+      success: true,
+      message: 'Login successful', 
       token,
       user: {
         id: user.user_id,
@@ -140,7 +178,10 @@ app.post('/login', async (req, res) => {
     });
   } catch (err) {
     console.error('Login error:', err);
-    return res.status(500).json({ error: 'Server error.' });
+    return res.status(500).json({ 
+      error: 'Login failed',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
 
@@ -153,10 +194,16 @@ app.get('/progress', authenticateJWT, async (req, res) => {
       args: [req.user.id],
     });
     
-    return res.json(result.rows);
+    res.json({
+      success: true,
+      progress: result.rows
+    });
   } catch (err) {
     console.error('Progress fetch error:', err);
-    return res.status(500).json({ error: 'Server error.' });
+    res.status(500).json({ 
+      error: 'Failed to fetch progress',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
 
@@ -164,13 +211,15 @@ app.post('/progress', authenticateJWT, async (req, res) => {
   const { language, level, module_id, lesson_id, is_completed, current_question_index } = req.body;
   
   if (!language || level === undefined || module_id === undefined || lesson_id === undefined) {
-    return res.status(400).json({ error: 'Required fields: language, level, module_id, lesson_id' });
+    return res.status(400).json({ 
+      error: 'Missing required fields',
+      required: ['language', 'level', 'module_id', 'lesson_id']
+    });
   }
 
   try {
     const db = getDB();
     
-    // Upsert progress
     await db.execute({
       sql: `
         INSERT INTO user_progress 
@@ -193,10 +242,16 @@ app.post('/progress', authenticateJWT, async (req, res) => {
       ],
     });
 
-    return res.json({ message: 'Progress updated successfully.' });
+    res.json({ 
+      success: true,
+      message: 'Progress updated successfully' 
+    });
   } catch (err) {
     console.error('Progress update error:', err);
-    return res.status(500).json({ error: 'Server error.' });
+    res.status(500).json({ 
+      error: 'Failed to update progress',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
 
@@ -209,10 +264,16 @@ app.get('/achievements', authenticateJWT, async (req, res) => {
       args: [req.user.id],
     });
     
-    return res.json(result.rows[0] || { xp_points: 0 });
+    res.json({
+      success: true,
+      xp_points: result.rows[0]?.xp_points || 0
+    });
   } catch (err) {
     console.error('Achievements fetch error:', err);
-    return res.status(500).json({ error: 'Server error.' });
+    res.status(500).json({ 
+      error: 'Failed to fetch achievements',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
 
@@ -220,20 +281,29 @@ app.post('/achievements/add-xp', authenticateJWT, async (req, res) => {
   const { xp } = req.body;
   
   if (!xp || isNaN(xp)) {
-    return res.status(400).json({ error: 'Valid xp amount required' });
+    return res.status(400).json({ 
+      error: 'Valid XP amount required',
+      received: xp
+    });
   }
 
   try {
     const db = getDB();
     await db.execute({
       sql: 'UPDATE user_achievements SET xp_points = xp_points + ? WHERE user_id = ?',
-      args: [xp, req.user.id],
+      args: [parseInt(xp), req.user.id],
     });
 
-    return res.json({ message: 'XP added successfully.' });
+    res.json({ 
+      success: true,
+      message: 'XP added successfully' 
+    });
   } catch (err) {
     console.error('XP update error:', err);
-    return res.status(500).json({ error: 'Server error.' });
+    res.status(500).json({ 
+      error: 'Failed to add XP',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
 
@@ -246,13 +316,25 @@ app.get('/profile', authenticateJWT, async (req, res) => {
       args: [req.user.id],
     });
     
-    return res.json(result.rows[0]);
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({
+      success: true,
+      profile: result.rows[0]
+    });
   } catch (err) {
     console.error('Profile fetch error:', err);
-    return res.status(500).json({ error: 'Server error.' });
+    res.status(500).json({ 
+      error: 'Failed to fetch profile',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
 
+// Start server
 app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
