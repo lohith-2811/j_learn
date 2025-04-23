@@ -3,7 +3,6 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { initDB, getDB } from './db.js';
-import rateLimit from 'express-rate-limit';
 
 dotenv.config();
 const app = express();
@@ -11,13 +10,6 @@ const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET;
 
 app.use(express.json());
-
-// Rate limiting for auth routes
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // limit each IP to 10 requests per windowMs
-  message: 'Too many attempts, please try again later'
-});
 
 // Initialize database
 initDB();
@@ -43,7 +35,7 @@ const authenticateJWT = (req, res, next) => {
 };
 
 // Signup Route
-app.post('/signup', authLimiter, async (req, res) => {
+app.post('/signup', async (req, res) => {
   const { username, email, password } = req.body;
   
   // Validation
@@ -98,7 +90,7 @@ app.post('/signup', authLimiter, async (req, res) => {
 });
 
 // Login Route
-app.post('/login', authLimiter, async (req, res) => {
+app.post('/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: 'Email and password are required.' });
